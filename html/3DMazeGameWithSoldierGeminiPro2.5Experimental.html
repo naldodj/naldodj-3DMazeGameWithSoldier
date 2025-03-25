@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demonstração de Jogo de Labirinto 3D</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden; /* Esconde barras de rolagem */
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            display: block; /* Evita espaço extra abaixo do canvas */
+        }
+        #debug-overlay {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 8px;
+            border-radius: 5px;
+            font-size: 12px;
+            line-height: 1.4;
+            pointer-events: none; /* Não interfere com cliques */
+        }
+        #instructions-overlay {
+            position: fixed;
+            bottom: 10px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 8px;
+            border-radius: 5px;
+            font-size: 12px;
+            line-height: 1.4;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="debug-overlay">
+        Posição: (0.00, 0.00, 0.00)<br>
+        Rotação Y: 0.0°<br>
+        Animação: Idle<br>
+        Pulos: 2/2
+    </div>
+    <div id="instructions-overlay">
+        WASD ou Setas: Mover<br>
+        Espaço: Pular<br>
+        Espaço (no ar): Pular novamente
+    </div>
+
+    <!-- Imports via CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        let scene, camera, renderer, controls, clock, mixer;
+        let soldier, soldierModel, currentAction, animations = {};
+        let mazeGrid = [];
+        let wallBoxes = []; // Array para guardar as bounding boxes das paredes
+        let characterBox = new THREE.Box3(); // Bounding box do personagem
+
+        // Configurações do Jogo e Física
+        const MAZE_SIZE = 16;
+        const CELL_SIZE = 4;
+        const WALL_HEIGHT = 3;
+        const CHARACTER_SCALE = 0.8;
+        const CHARACTER_RADIUS = 0.5; // Raio de colisão
+        const CHARACTER_HEIGHT = 1.8 * CHARACTER_SCALE; // Altura visual do personagem
+        const COLLISION_HEIGHT = 1.5; // Altura da caixa de colisão do personagem
+
+        const GRAVITY = 20.0;
+        const MOVE_SPEED = 5.0;
+        const JUMP_FORCE = 12.0; // Força do primeiro pulo
+        const DOUBLE_JUMP_FORCE = 10.0; // Força do segundo pulo
+        const MAX_JUMPS = 2;
+        const JUMP_COOLDOWN = 300; // ms
+
+        // Estado do Jogador
+        let velocityY = 0;
+        let jumpsRemaining = MAX_JUMPS;
+        let isGrounded = true;
+        let lastJumpTime = 0;
+        let keysPressed = {};
+        let moveDirection = new THREE.Vector3();
+        let cameraForward = new THREE.Vector3();
+        let cameraRight = new THREE.Vector3();
+
+        // Elementos da UI
+        let debugOverlay, instructionsOverlay;
+
+        init();
+        animate();
+
+        // --- FUNÇÕES PRINCIPAIS ---
+
+        function init() {
+            clock = new THREE.Clock();
+            debugOverlay = document.getElementById('debug-overlay');
+            instructionsOverlay = document.getElementById('instructions-overlay');
+
+            // Cena
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); // Azul claro (céu)
+
+            // Câmera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 20, 30); // Posição inicial da câmera
+
+            // Renderizador
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true; // Habilitar sombras
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+
+            // Controles da Câmera (OrbitControls)
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; // Suaviza a rotação
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false;
+            controls.maxPolarAngle = Math.PI / 2 - 0.1; // Limita ângulo vertical
+
+            // Iluminação
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(20, 30, 20);
+            dirLight.castShadow = true;
+            dirLight.shadow.camera.near = 0.1;
+            dirLight.shadow.camera.far = 100;
+            dirLight.shadow.camera.left = -30;
+            dirLight.shadow.camera.right = 30;
+            dirLight.shadow.camera.top = 30;
+            dirLight.shadow.camera.bottom = -30;
+            dirLight.shadow.mapSize.width = 1024;
+            dirLight.shadow.mapSize.height = 1024;
+            scene.add(dirLight);
+            // const shadowHelper = new THREE.CameraHelper(dirLight.shadow.camera); // Opcional: para debug
+            // scene.add(shadowHelper);
+
+            // Geração do Labirinto e Geometria
+            generateMaze();
+            createLevelGeometry();
+
+            // Carregar Modelo do Soldado
+            loadCharacter();
+
+            // Event Listeners
+            window.addEventListener('resize', onWindowResize, false);
+            document.addEventListener('keydown', (event) => { keysPressed[event.key.toLowerCase()] = true; });
+            document.addEventListener('keyup', (event) => { keysPressed[event.key.toLowerCase()] = false; });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+
+            if (mixer) {
+                mixer.update(delta); // Atualiza animações PRIMEIRO
+            }
+
+            if (soldierModel) {
+                updatePhysics(delta);
+                updateMovement(delta);
+                updateAnimation(delta);
+                updateDebugInfo();
+
+                 // Atualiza o alvo da câmera para seguir o soldado
+                controls.target.set(
+                    soldierModel.position.x,
+                    soldierModel.position.y + CHARACTER_HEIGHT / 2, // Mira no centro vertical
+                    soldierModel.position.z
+                );
+            }
+
+            controls.update(); // Atualiza OrbitControls
+            renderer.render(scene, camera);
+        }
+
+        // --- GERAÇÃO DO LABIRINTO E NÍVEL ---
+
+        function generateMaze() {
+            mazeGrid = Array(MAZE_SIZE).fill(null).map(() => Array(MAZE_SIZE).fill(0));
+            const wallChance = 0.15; // 15% de chance de parede
+
+            for (let x = 0; x < MAZE_SIZE; x++) {
+                for (let z = 0; z < MAZE_SIZE; z++) {
+                    // Borda externa é sempre parede
+                    if (x === 0 || x === MAZE_SIZE - 1 || z === 0 || z === MAZE_SIZE - 1) {
+                        mazeGrid[x][z] = 1;
+                    }
+                    // Área central aberta (6 a 9)
+                    else if (x >= 6 && x <= 9 && z >= 6 && z <= 9) {
+                        mazeGrid[x][z] = 0;
+                    }
+                    // Paredes aleatórias no resto
+                    else if (Math.random() < wallChance) {
+                        mazeGrid[x][z] = 1;
+                    }
+                }
+            }
+        }
+
+        function createFloorTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 256;
+            const context = canvas.getContext('2d');
+
+            // Cor base marrom
+            context.fillStyle = '#8B4513';
+            context.fillRect(0, 0, 256, 256);
+
+            // Linhas de grade escuras
+            context.strokeStyle = '#654321';
+            context.lineWidth = 2;
+            for (let i = 0; i <= 256; i += 16) {
+                context.beginPath();
+                context.moveTo(i, 0);
+                context.lineTo(i, 256);
+                context.stroke();
+                context.beginPath();
+                context.moveTo(0, i);
+                context.lineTo(256, i);
+                context.stroke();
+            }
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(16, 16); // Repete 16x em cada direção
+            return texture;
+        }
+
+        function createWallTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 128;
+            canvas.height = 128;
+            const context = canvas.getContext('2d');
+
+            // Cor base cinza
+            context.fillStyle = '#808080';
+            context.fillRect(0, 0, 128, 128);
+
+            // Retângulos aleatórios
+            for (let i = 0; i < 50; i++) {
+                const gray = Math.floor(Math.random() * 101) + 100; // Cinza entre 100 e 200
+                context.fillStyle = `rgb(${gray}, ${gray}, ${gray})`;
+                const w = Math.random() * 10 + 5; // Largura 5-15
+                const h = Math.random() * 10 + 5; // Altura 5-15
+                const x = Math.random() * (128 - w);
+                const y = Math.random() * (128 - h);
+                context.fillRect(x, y, w, h);
+            }
+
+            const texture = new THREE.CanvasTexture(canvas);
+             // Não precisa de repeat neste caso (já que não especificou tile)
+             // texture.wrapS = THREE.RepeatWrapping;
+             // texture.wrapT = THREE.RepeatWrapping;
+             // texture.repeat.set(1, 1);
+            return texture;
+        }
+
+        function createLevelGeometry() {
+            // Chão
+            const floorGeometry = new THREE.PlaneGeometry(MAZE_SIZE * CELL_SIZE, MAZE_SIZE * CELL_SIZE);
+            const floorMaterial = new THREE.MeshStandardMaterial({
+                map: createFloorTexture(),
+                side: THREE.DoubleSide, // Visível de ambos os lados
+                roughness: 0.8,
+                metalness: 0.2
+            });
+            const floorMesh = new THREE.Mesh(floorGeometry, floorMaterial);
+            floorMesh.rotation.x = -Math.PI / 2; // Deita o plano
+            floorMesh.receiveShadow = true; // Recebe sombras
+            scene.add(floorMesh);
+
+            // Paredes
+            const wallGeometry = new THREE.BoxGeometry(CELL_SIZE, WALL_HEIGHT, CELL_SIZE);
+            const wallMaterial = new THREE.MeshStandardMaterial({
+                map: createWallTexture(),
+                roughness: 0.7,
+                metalness: 0.3
+            });
+
+            const offset = - (MAZE_SIZE * CELL_SIZE) / 2 + CELL_SIZE / 2; // Para centralizar o grid no (0,0)
+
+            for (let x = 0; x < MAZE_SIZE; x++) {
+                for (let z = 0; z < MAZE_SIZE; z++) {
+                    if (mazeGrid[x][z] === 1) {
+                        const wallMesh = new THREE.Mesh(wallGeometry, wallMaterial);
+                        wallMesh.position.set(
+                            x * CELL_SIZE + offset,
+                            WALL_HEIGHT / 2, // Metade da altura para a base ficar no y=0
+                            z * CELL_SIZE + offset
+                        );
+                        wallMesh.castShadow = true;
+                        wallMesh.receiveShadow = true;
+                        scene.add(wallMesh);
+
+                        // Cria e armazena a Bounding Box da parede
+                        const box = new THREE.Box3();
+                        box.setFromObject(wallMesh);
+                        // Ajuste opcional da altura da caixa de colisão da parede, se necessário
+                        // box.min.y = 0;
+                        // box.max.y = WALL_HEIGHT; // Altura total da parede visual
+                        wallBoxes.push(box);
+                    }
+                }
+            }
+        }
+
+        // --- PERSONAGEM E ANIMAÇÕES ---
+
+        function loadCharacter() {
+            const loader = new THREE.GLTFLoader();
+            loader.load(
+                'https://threejs.org/examples/models/gltf/Soldier.glb',
+                function (gltf) {
+                    soldier = gltf; // Armazena o gltf inteiro
+                    soldierModel = gltf.scene;
+                    soldierModel.scale.set(CHARACTER_SCALE, CHARACTER_SCALE, CHARACTER_SCALE);
+                    soldierModel.position.set(0, 0, 0); // Posição inicial no chão
+
+                    // Habilitar sombras para o modelo
+                    soldierModel.traverse(function (object) {
+                        if (object.isMesh) {
+                            object.castShadow = true;
+                        }
+                    });
+                    scene.add(soldierModel);
+
+                    // Configurar Animações
+                    mixer = new THREE.AnimationMixer(soldierModel);
+                    animations.idle = mixer.clipAction(gltf.animations[0]); // Idle
+                    animations.jump = mixer.clipAction(gltf.animations[1]); // Jump
+                    animations.run = mixer.clipAction(gltf.animations[3]);  // Run
+
+                    // Configurar animação de pulo
+                    animations.jump.setLoop(THREE.LoopOnce);
+                    animations.jump.clampWhenFinished = true;
+
+                    // Iniciar com animação Idle
+                    currentAction = animations.idle;
+                    currentAction.play();
+                },
+                undefined, // onProgress callback (opcional)
+                function (error) {
+                    console.error('Erro ao carregar o modelo:', error);
+                }
+            );
+        }
+
+        function switchAnimation(newAction) {
+            if (newAction === currentAction) return;
+
+            const fadeDuration = 0.1; // Crossfade rápido
+
+            // Garante que a ação anterior será interrompida corretamente
+            if (currentAction) {
+                 currentAction.fadeOut(fadeDuration);
+            }
+
+            // Configura e inicia a nova ação
+            newAction.reset(); // Reseta a animação
+            newAction.setEffectiveTimeScale(1);
+            newAction.setEffectiveWeight(1);
+            newAction.fadeIn(fadeDuration);
+            newAction.play();
+
+            // Tratamento especial para pulo (LoopOnce)
+            if (newAction === animations.jump) {
+                mixer.removeEventListener('finished', onJumpFinished); // Remove listener antigo se houver
+                mixer.addEventListener('finished', onJumpFinished); // Adiciona listener para quando o pulo acabar
+            } else {
+                 mixer.removeEventListener('finished', onJumpFinished); // Garante que o listener não fique ativo
+            }
+
+            currentAction = newAction;
+        }
+
+        // Chamado quando a animação de pulo (LoopOnce) termina
+        function onJumpFinished(event) {
+            if (event.action === animations.jump) {
+                // Se ainda estiver no ar, pode voltar para idle ou run (se movendo)
+                // A lógica principal em updateAnimation vai cuidar disso no próximo frame
+                // Apenas removemos o listener para não re-acionar
+                 mixer.removeEventListener('finished', onJumpFinished);
+                 // Força a transição se estiver no chão parado
+                 if (isGrounded && moveDirection.lengthSq() === 0) {
+                     switchAnimation(animations.idle);
+                 } else if (isGrounded && moveDirection.lengthSq() > 0) {
+                      switchAnimation(animations.run);
+                 }
+            }
+        }
+
+
+        // --- FÍSICA E MOVIMENTO ---
+
+        function updatePhysics(delta) {
+             if (!soldierModel) return;
+
+             const previousY = soldierModel.position.y;
+
+             // Aplicar Gravidade
+             velocityY -= GRAVITY * delta;
+             let nextY = soldierModel.position.y + velocityY * delta;
+
+             let landedOnWall = false;
+
+             // Detecção de Colisão Vertical (Chão e Paredes)
+             if (velocityY <= 0) { // Só checa colisão ao cair
+                // Atualiza a caixa de colisão do personagem na posição horizontal atual, mas Y futuro
+                updateCharacterBox(soldierModel.position.x, nextY, soldierModel.position.z);
+
+                 // 1. Checar colisão com o chão
+                 if (characterBox.min.y <= 0) {
+                     nextY = 0; // Nível do chão
+                     velocityY = 0;
+                     if (!isGrounded) { // Só reseta se não estava no chão antes
+                         isGrounded = true;
+                         jumpsRemaining = MAX_JUMPS;
+                     }
+                 } else {
+                      isGrounded = false; // Se não está no chão, está no ar
+
+                    // 2. Checar colisão com o topo das paredes
+                    for (const wallBox of wallBoxes) {
+                         // Verifica se há interseção horizontal E se está caindo sobre a parede
+                        const intersectsHorizontally = characterBox.max.x > wallBox.min.x && characterBox.min.x < wallBox.max.x &&
+                                                   characterBox.max.z > wallBox.min.z && characterBox.min.z < wallBox.max.z;
+
+                        if (intersectsHorizontally && previousY >= WALL_HEIGHT && nextY <= WALL_HEIGHT) {
+                             nextY = WALL_HEIGHT; // Pousa no topo da parede
+                             velocityY = 0;
+                             isGrounded = true;
+                             jumpsRemaining = MAX_JUMPS;
+                             landedOnWall = true; // Marca que pousou
+                             break; // Encontrou uma parede para pousar
+                        }
+                    }
+                 }
+             } else {
+                 isGrounded = false; // Se está subindo, não está no chão
+             }
+
+             // Aplica a posição Y final
+             soldierModel.position.y = nextY;
+
+             // Lógica do Pulo
+             const now = performance.now();
+             if ((keysPressed[' '] || keysPressed['spacebar']) && jumpsRemaining > 0 && (now - lastJumpTime > JUMP_COOLDOWN)) {
+                 if (jumpsRemaining === MAX_JUMPS) { // Primeiro pulo
+                     velocityY = JUMP_FORCE;
+                 } else { // Segundo pulo
+                     velocityY = DOUBLE_JUMP_FORCE;
+                 }
+                 jumpsRemaining--;
+                 isGrounded = false;
+                 lastJumpTime = now;
+                 switchAnimation(animations.jump); // Aciona a animação de pulo imediatamente
+             }
+        }
+
+        function updateMovement(delta) {
+             if (!soldierModel) return;
+
+            moveDirection.set(0, 0, 0); // Reseta a direção a cada frame
+
+            // Obtem direções da câmera no plano XZ
+            camera.getWorldDirection(cameraForward);
+            cameraForward.y = 0;
+            cameraForward.normalize();
+
+            cameraRight.crossVectors(camera.up, cameraForward).negate(); // Vetor à direita da câmera
+
+            // Calcula a direção baseada nas teclas pressionadas
+            if (keysPressed['w'] || keysPressed['arrowup']) {
+                moveDirection.add(cameraForward);
+            }
+            if (keysPressed['s'] || keysPressed['arrowdown']) {
+                moveDirection.sub(cameraForward);
+            }
+            if (keysPressed['a'] || keysPressed['arrowleft']) {
+                moveDirection.sub(cameraRight); // CORRETO: Subtrai o vetor direito (move para a esquerda)
+            }
+            if (keysPressed['d'] || keysPressed['arrowright']) {
+                moveDirection.add(cameraRight); // CORRETO: Adiciona o vetor direito (move para a direita)
+            }
+
+            if (moveDirection.lengthSq() > 0) { // Se houver input de movimento
+                moveDirection.normalize();
+
+                // Calcula a posição futura
+                const moveDistance = MOVE_SPEED * delta;
+                const potentialPosition = soldierModel.position.clone().add(moveDirection.clone().multiplyScalar(moveDistance));
+
+                // Atualiza a caixa de colisão do personagem para a posição futura
+                updateCharacterBox(potentialPosition.x, soldierModel.position.y, potentialPosition.z); // Usa Y atual para colisão lateral
+
+                // Verifica Colisão Lateral com Paredes
+                let canMove = true;
+                for (const wallBox of wallBoxes) {
+                    const standingY = soldierModel.position.y; // Altura atual dos pés
+                    const collisionCheckTolerance = 0.01; // Pequena tolerância p/ ponto flutuante
+
+                    // *** CONDIÇÃO CHAVE ***
+                    // Ignore esta parede para colisão LATERAL se seu topo estiver
+                    // abaixo (ou quase no mesmo nível) dos pés do personagem.
+                    // Uma parede abaixo de você não deve bloquear seu movimento para os lados.
+                    if (wallBox.max.y < standingY + collisionCheckTolerance) {
+                        continue; // Pula para a próxima parede, esta não bloqueia lateralmente
+                    }
+
+                    // Se a parede é relevante (alta o suficiente), aí sim, verifique a interseção
+                    if (characterBox.intersectsBox(wallBox)) {
+                        canMove = false;
+                        break; // Colisão lateral real encontrada
+                    }
+                }
+
+                // Se não houver colisão, move o personagem
+                if (canMove) {
+                    soldierModel.position.copy(potentialPosition);
+
+                    // Atualiza a Rotação do soldado para encarar a direção do movimento
+                    // O + Math.PI ajusta a rotação porque o modelo Soldier.glb encara -Z por padrão
+                    const angle = Math.atan2(moveDirection.x, moveDirection.z);
+                    soldierModel.rotation.y = angle + Math.PI;
+                }
+            }
+        }
+
+        // Helper para atualizar a caixa de colisão do personagem
+        function updateCharacterBox(x, y, z) {
+            characterBox.set(
+                new THREE.Vector3(x - CHARACTER_RADIUS, y, z - CHARACTER_RADIUS),
+                new THREE.Vector3(x + CHARACTER_RADIUS, y + COLLISION_HEIGHT, z + CHARACTER_RADIUS)
+            );
+        }
+
+        function updateAnimation() {
+            if (!soldierModel || !currentAction) return;
+
+            let targetAnimation = animations.idle; // Padrão é Idle
+
+            if (!isGrounded) {
+                 // Se estiver pulando (velocityY > 0 ou a animação de pulo está tocando)
+                 // Ou se estiver caindo
+                 // Mantém a animação de pulo ATÉ ELA TERMINAR ou tocar o chão
+                 if (currentAction !== animations.jump || !currentAction.isRunning()) {
+                    // Só troca para pulo se não estiver já pulando
+                    // Se estiver caindo mas a animação de pulo acabou, pode ir pra idle/run? Não, vamos forçar Idle no ar se não pulando.
+                    // Manter 'Jump' enquanto velocityY > 0 (subindo)? Ou enquanto !isGrounded?
+                    // Melhor: se !isGrounded, a animação é Jump, a menos que já tenha terminado. Se terminou, Idle.
+                     if (velocityY > 0.1 || (currentAction === animations.jump && currentAction.isRunning()) ) { // Subindo ou pulando ativamente
+                           targetAnimation = animations.jump;
+                     } else { // Caindo e animação de pulo terminou
+                         // Poderia ter uma animação de queda aqui, mas usamos Idle por simplicidade
+                          targetAnimation = animations.idle;
+                         // O listener onJumpFinished já pode ter feito a transição
+                     }
+
+                 } else {
+                      targetAnimation = animations.jump; // Continua pulando
+                 }
+
+            } else if (moveDirection.lengthSq() > 0) {
+                targetAnimation = animations.run; // Correndo se no chão e movendo
+            } else {
+                targetAnimation = animations.idle; // Parado no chão
+            }
+
+            // Só troca se a animação alvo for diferente da atual
+            if (currentAction !== targetAnimation) {
+                // Se estiver terminando o pulo, deixa o onJumpFinished tratar a transição para idle/run
+                if (!(currentAction === animations.jump && currentAction.isRunning())) {
+                     switchAnimation(targetAnimation);
+                }
+            }
+        }
+
+
+        // --- UTILITÁRIOS E UI ---
+
+        function updateDebugInfo() {
+            if (!soldierModel || !currentAction) return;
+
+            const pos = soldierModel.position;
+            const rotY = soldierModel.rotation.y * (180 / Math.PI); // Converte radianos para graus
+            const animName = Object.keys(animations).find(key => animations[key] === currentAction) || 'Desconhecida';
+
+            debugOverlay.innerHTML = `
+                Posição: (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)})<br>
+                Rotação Y: ${rotY.toFixed(1)}°<br>
+                Animação: ${animName.charAt(0).toUpperCase() + animName.slice(1)}<br>
+                Pulos: ${jumpsRemaining}/${MAX_JUMPS}<br>
+                Grounded: ${isGrounded} | VelY: ${velocityY.toFixed(2)}
+            `; // Adicionado info extra para debug
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+    </script>
+</body>
+</html>
